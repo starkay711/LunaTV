@@ -3,10 +3,27 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
-import { getConfig } from '@/lib/config';
+import { getConfig, refineConfig } from '@/lib/config';
 import { db } from '@/lib/db';
+import { AdminConfig } from '@/lib/admin.types';
 
 export const runtime = 'nodejs';
+
+// 从配置文件 ConfigFile 的 api_site 里同步删掉一批源。
+// 只删 SourceConfig 不够：refineConfig 会把 ConfigFile 里还在的源重新加回来，
+// 这就是以前“删了又回来”的根因。解析失败时只记日志，不让整个删除操作失败。
+function removeKeysFromConfigFile(adminConfig: AdminConfig, keys: string[]) {
+  if (keys.length === 0) return;
+  try {
+    const fileConfig = JSON.parse(adminConfig.ConfigFile || '{}');
+    if (fileConfig.api_site) {
+      keys.forEach((k) => delete fileConfig.api_site[k]);
+      adminConfig.ConfigFile = JSON.stringify(fileConfig);
+    }
+  } catch (e) {
+    console.error('从配置文件删除视频源失败:', e);
+  }
+}
 
 // 支持的操作类型
 type Action = 'add' | 'disable' | 'enable' | 'delete' | 'sort' | 'batch_disable' | 'batch_enable' | 'batch_delete';
@@ -44,6 +61,11 @@ export async function POST(request: NextRequest) {
 
     // 获取配置与存储
     const adminConfig = await getConfig();
+
+    // 删除类操作的真实结果：前端按这个报数，不再按选中数报。
+    // 以前 batch_delete 静默跳过 config 来源的源还返回 ok:true，前端又按选中数报“删除了 N 个”，
+    // 两边一合就是“提示成功、实际一个没删”。
+    let result: Record<string, unknown> = {};
 
     // 权限与身份校验
     if (username !== process.env.USERNAME) {
@@ -106,11 +128,10 @@ export async function POST(request: NextRequest) {
         const idx = adminConfig.SourceConfig.findIndex((s) => s.key === key);
         if (idx === -1)
           return NextResponse.json({ error: '源不存在' }, { status: 404 });
-        const entry = adminConfig.SourceConfig[idx];
-        if (entry.from === 'config') {
-          return NextResponse.json({ error: '该源不可删除' }, { status: 400 });
-        }
         adminConfig.SourceConfig.splice(idx, 1);
+        // 配置文件里的源也要同步删掉，否则 refineConfig 会把它加回来
+        removeKeysFromConfigFile(adminConfig, [key]);
+        result = { deleted: [key] };
 
         // 检查并清理用户组和用户的权限数组
         // 清理用户组权限
@@ -161,19 +182,21 @@ export async function POST(request: NextRequest) {
         if (!Array.isArray(keys) || keys.length === 0) {
           return NextResponse.json({ error: '缺少 keys 参数或为空' }, { status: 400 });
         }
-        // 过滤掉 from=config 的源，但不报错
-        const keysToDelete = keys.filter(key => {
-          const entry = adminConfig.SourceConfig.find((s) => s.key === key);
-          return entry && entry.from !== 'config';
-        });
-
-        // 批量删除
-        keysToDelete.forEach(key => {
+        // 配置文件来源的源也能删：同步从 ConfigFile 的 api_site 里去掉，
+        // 否则下次 refineConfig 会把它加回来。删不掉的不再静默跳过，记进 skipped 返回给前端。
+        const keysToDelete: string[] = [];
+        const skippedKeys: string[] = [];
+        keys.forEach((key) => {
           const idx = adminConfig.SourceConfig.findIndex((s) => s.key === key);
           if (idx !== -1) {
             adminConfig.SourceConfig.splice(idx, 1);
+            keysToDelete.push(key);
+          } else {
+            skippedKeys.push(key);
           }
         });
+        removeKeysFromConfigFile(adminConfig, keysToDelete);
+        result = { deleted: keysToDelete, skipped: skippedKeys };
 
         // 检查并清理用户组和用户的权限数组
         if (keysToDelete.length > 0) {
@@ -223,11 +246,12 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: '未知操作' }, { status: 400 });
     }
 
-    // 持久化到存储
+    // 按最新的 ConfigFile 重新对齐 from 标记等派生状态，再持久化到存储
+    refineConfig(adminConfig);
     await db.saveAdminConfig(adminConfig);
 
     return NextResponse.json(
-      { ok: true },
+      { ok: true, ...result },
       {
         headers: {
           'Cache-Control': 'no-store',
