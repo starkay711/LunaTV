@@ -2117,8 +2117,10 @@ const VideoSourceConfig = ({
         throw new Error(data.error || `操作失败: ${resp.status}`);
       }
 
-      // 成功后刷新配置
+      const data = await resp.json().catch(() => ({}));
+      // 成功后刷新配置，把后端返回的真实结果带回给调用处报数
       await refreshConfig();
+      return data;
     } catch (err) {
       showError(err instanceof Error ? err.message : '操作失败', showAlert);
       throw err; // 向上抛出方便调用处判断
@@ -2135,7 +2137,9 @@ const VideoSourceConfig = ({
   };
 
   const handleDelete = (key: string) => {
-    withLoading(`deleteSource_${key}`, () => callSourceApi({ action: 'delete', key })).catch(() => {
+    withLoading(`deleteSource_${key}`, () => callSourceApi({ action: 'delete', key })).then(() => {
+      showAlert({ type: 'success', title: '删除成功', message: `已删除视频源 ${key}`, timer: 2000 });
+    }).catch(() => {
       console.error('操作失败', 'delete', key);
     });
   };
@@ -2478,8 +2482,15 @@ const VideoSourceConfig = ({
       message: confirmMessage,
       onConfirm: async () => {
         try {
-          await withLoading(`batchSource_${action}`, () => callSourceApi({ action, keys }));
-          showAlert({ type: 'success', title: `${actionName}成功`, message: `${actionName}了 ${keys.length} 个视频源`, timer: 2000 });
+          const data = await withLoading(`batchSource_${action}`, () => callSourceApi({ action, keys })) as { deleted?: string[]; skipped?: string[] } | undefined;
+          // 批量删除按后端返回的真实结果报数，不再按选中数报：
+          // 以前不管实际删了几个都报“删除了 N 个”，这就是假成功的另一半。
+          if (action === 'batch_delete' && data && Array.isArray(data.deleted)) {
+            const skippedMsg = data.skipped && data.skipped.length > 0 ? `，跳过 ${data.skipped.length} 个（不存在）` : '';
+            showAlert({ type: 'success', title: `${actionName}成功`, message: `实际删除了 ${data.deleted.length} 个视频源${skippedMsg}`, timer: 2000 });
+          } else {
+            showAlert({ type: 'success', title: `${actionName}成功`, message: `${actionName}了 ${keys.length} 个视频源`, timer: 2000 });
+          }
           // 重置选择状态
           setSelectedSources(new Set());
         } catch (err) {
