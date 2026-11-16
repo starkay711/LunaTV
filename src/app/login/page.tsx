@@ -129,7 +129,7 @@ function LoginPageClient() {
 
 
   return (
-    <div className='relative min-h-screen flex items-center justify-center px-4 overflow-hidden'>
+    <main className='relative min-h-screen flex items-center justify-center px-4 overflow-hidden'>
       <div className='absolute top-4 right-4'>
         <ThemeToggle />
       </div>
@@ -189,7 +189,7 @@ function LoginPageClient() {
 
       {/* 版本信息显示 */}
       <VersionDisplay />
-    </div>
+    </main>
   );
 }
 
